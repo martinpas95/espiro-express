@@ -303,13 +303,20 @@
   }
 
   var busyTimer = null;
+  var currentController = null;
+  var lastFile = null;
+  function cancelCurrent(){
+    if(currentController) currentController.abort();
+  }
   function renderBusy(){
     document.title = PAGE_TITLE;
     clearInterval(busyTimer);
     var zone = document.getElementById('zone'); if(!zone) return;
     zone.className = 'zone busy';
     zone.innerHTML = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>' +
-      '<div class="main">Leyendo la espirometría…</div><div class="sub" id="busySub">Podés seguir trabajando — te avisa solo cuando esté (0s)</div>';
+      '<div class="main">Leyendo la espirometría…</div><div class="sub" id="busySub">Podés seguir trabajando — te avisa solo cuando esté (0s)</div>' +
+      '<button class="reset-btn" type="button" id="cancelBtn">Cancelar</button>';
+    document.getElementById('cancelBtn').addEventListener('click', function(e){ e.stopPropagation(); cancelCurrent(); });
     var start = Date.now();
     busyTimer = setInterval(function(){
       var sub = document.getElementById('busySub');
@@ -338,9 +345,12 @@
     var zone = document.getElementById('zone'); if(!zone) return;
     zone.className = 'zone error';
     zone.innerHTML = '<div class="line">' + escapeHtml(msg) + '</div>' +
+      (lastFile ? '<button class="copy-btn" type="button" id="retryBtn">↻ Reintentar</button>' : '') +
       '<button class="reset-btn" type="button" id="resetBtn">↺ Reiniciar</button>' +
-      '<div class="again">Hacé clic, pegá de nuevo o reiniciá para reintentar</div>';
+      '<div class="again">Reintentá con la misma imagen, pegá una nueva o reiniciá</div>';
     document.getElementById('resetBtn').addEventListener('click', function(e){ e.stopPropagation(); resetZone(); });
+    var retryBtn = document.getElementById('retryBtn');
+    if(retryBtn) retryBtn.addEventListener('click', function(e){ e.stopPropagation(); if(lastFile) handleFile(lastFile); });
   }
   function resetZone(){
     clearInterval(busyTimer);
@@ -442,7 +452,7 @@
     if(err && err.status === 404) return 'El modelo no está disponible con esta clave — hacé clic en el engranaje y revisá la clave.';
     if(err && err.status === 429) return 'Alcanzaste el límite gratuito por ahora — esperá un momento y probá de nuevo.';
     if(err && err.message === 'no-json') return 'No se pudo interpretar la respuesta. Probá de nuevo.';
-    if(err && err.name === 'AbortError') return 'Tardó más de 15s y se cortó (wifi lenta o el servidor no responde) — probá de nuevo.';
+    if(err && err.name === 'AbortError') return 'Cancelado.';
     if(err && /Failed to fetch/i.test(err.message || '')) return 'No hay conexión con el servidor de Gemini. Revisá tu internet.';
     return 'No se pudo leer la imagen (' + (err && err.message ? err.message : 'error desconocido') + ').';
   }
@@ -450,9 +460,10 @@
   function handleFile(file){
     var apiKey = getKey();
     if(!apiKey){ renderKeySetup(); return; }
+    lastFile = file;
     renderBusy();
     var controller = new AbortController();
-    var timeoutId = setTimeout(function(){ controller.abort(); }, 15000);
+    currentController = controller;
     Promise.resolve().then(function(){
       if(file.type === 'application/pdf') return pdfFirstPageToBlob(file);
       return file;
@@ -461,13 +472,13 @@
     }).then(function(prepared){
       return callGemini(apiKey, prepared.base64, prepared.mediaType, controller.signal);
     }).then(function(text){
-      clearTimeout(timeoutId);
+      currentController = null;
       var data = extractJson(text);
       var line = computeLine(data);
       if(!line){ renderErr('No se pudieron leer todos los valores con confianza — probá con una captura más clara y completa.'); return; }
       renderDone(line);
     }).catch(function(err){
-      clearTimeout(timeoutId);
+      currentController = null;
       renderErr(errorMessageFor(err));
     });
   }

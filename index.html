@@ -143,8 +143,8 @@
     '  "fvc_L": number,            // fila FVC, columna "Best" (nunca PRE #1/#2/#3), en litros\n' +
     '  "fvc_pct_teor": number,     // fila FVC, columna "%Teor." asociada al valor Best (entero)\n' +
     '  "fvc_z": number,            // fila FVC, columna "Z-score" asociada al valor Best\n' +
-    '  "tiene_post": boolean,      // true si existe una columna POST con valor de FEV1\n' +
-    '  "fev1_predicho_L": number,  // fila FEV1, columna "Teor." (valor teorico/predicho en litros, NO %Teor.), o null si no se ve\n' +
+    '  "tiene_post": boolean,      // true solo si la columna POST tiene un valor numerico de FEV1 (prueba post-broncodilatador realizada); false si la columna POST esta vacia o no existe\n' +
+    '  "fev1_predicho_L": number,  // fila FEV1, columna "Teor." (valor teorico/predicho en litros, NO %Teor.); es el mismo valor para PRE y POST y siempre esta en esa columna\n' +
     '  "fev1_post_L": number       // fila FEV1, columna POST, en litros, o null si no hay prueba post-broncodilatador\n' +
     '}\n\n' +
     'Usá siempre la columna "Best" para los valores de FEV1, FVC y FEV1/FVC (nunca PRE #1, #2 o #3, aunque coincidan con Best). Si un dato no se puede leer con confianza, usa null en ese campo. No inventes valores.';
@@ -178,11 +178,18 @@
       'FEV1: ' + fev1L.toFixed(2) + 'L (' + Math.round(fev1Pct) + '%) ' + fev1Z.toFixed(2) + ', ' +
       'FVC: ' + fvcL.toFixed(2) + 'L (' + Math.round(fvcPct) + '%) ' + fvcZ.toFixed(2);
 
-    if(d.tiene_post && d.fev1_post_L != null && d.fev1_predicho_L != null){
-      var predL = Number(d.fev1_predicho_L), postL = Number(d.fev1_post_L);
-      if(!Number.isNaN(predL) && !Number.isNaN(postL) && predL > 0){
-        var bdr = (postL - fev1L) / predL * 100;
-        if(bdr > 10) line += ' +' + Math.round(bdr) + '% postb2';
+    var postL = d.fev1_post_L == null || d.fev1_post_L === '' ? NaN : Number(d.fev1_post_L);
+    if(d.tiene_post && postL > 0){
+      var predL = d.fev1_predicho_L == null || d.fev1_predicho_L === '' ? NaN : Number(d.fev1_predicho_L);
+      if(!(predL > 0) && fev1Pct > 0) predL = fev1L / (fev1Pct / 100);
+      if(predL > 0){
+        var bdr = ((Math.round(postL * 1000) - Math.round(fev1L * 1000)) * 100) / Math.round(predL * 1000);
+        var signif = bdr >= 10;
+        var shown = Math.round(bdr);
+        var txt = (!signif && shown >= 10) ? bdr.toFixed(1) : String(shown);
+        line += ' ' + (bdr >= 0 ? '+' : '') + txt + '% ' + 'Prueba postb2 ' + (signif ? 'significativa' : 'no significativa');
+      } else {
+        line += ' (Prueba postb2 realizada: no se pudo calcular el %)';
       }
     }
     return line;

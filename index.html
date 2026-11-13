@@ -312,23 +312,34 @@
   var busyTimer = null;
   var currentController = null;
   var lastFile = null;
+  var runCounter = 0;
+  var busyStage = '';
+  var busyStart = 0;
   function cancelCurrent(){
     if(currentController) currentController.abort();
+  }
+  function busyText(){
+    return busyStage + ' (' + Math.round((Date.now() - busyStart) / 1000) + 's) — podés seguir trabajando, te avisa solo';
+  }
+  function setStage(text){
+    busyStage = text;
+    var sub = document.getElementById('busySub');
+    if(sub) sub.textContent = busyText();
   }
   function renderBusy(){
     document.title = PAGE_TITLE;
     clearInterval(busyTimer);
     var zone = document.getElementById('zone'); if(!zone) return;
     zone.className = 'zone busy';
+    busyStart = Date.now();
     zone.innerHTML = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>' +
-      '<div class="main">Leyendo la espirometría…</div><div class="sub" id="busySub">Podés seguir trabajando — te avisa solo cuando esté (0s)</div>' +
+      '<div class="main">Leyendo la espirometría…</div><div class="sub" id="busySub">' + escapeHtml(busyText()) + '</div>' +
       '<button class="reset-btn" type="button" id="cancelBtn">Cancelar</button>';
     document.getElementById('cancelBtn').addEventListener('click', function(e){ e.stopPropagation(); cancelCurrent(); });
-    var start = Date.now();
     busyTimer = setInterval(function(){
       var sub = document.getElementById('busySub');
       if(!sub){ clearInterval(busyTimer); return; }
-      sub.textContent = 'Podés seguir trabajando — te avisa solo cuando esté (' + Math.round((Date.now() - start) / 1000) + 's)';
+      sub.textContent = busyText();
     }, 1000);
   }
   function renderDone(line){
@@ -378,35 +389,64 @@
 
   function prepareImage(blob){
     return new Promise(function(resolve, reject){
+      var url = URL.createObjectURL(blob);
       var img = new Image();
       img.onload = function(){
-        var maxDim = 900;
-        var w = img.naturalWidth, h = img.naturalHeight;
-        var scale = Math.min(1, maxDim / Math.max(w, h));
-        w = Math.round(w * scale); h = Math.round(h * scale);
-        var canvas = document.createElement('canvas');
-        canvas.width = w; canvas.height = h;
-        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-        canvas.toBlob(function(outBlob){
-          blobToBase64(outBlob).then(function(b64){ resolve({ base64: b64, mediaType: 'image/jpeg' }); });
-        }, 'image/jpeg', 0.88);
+        try{
+          var maxDim = 900;
+          var w = img.naturalWidth, h = img.naturalHeight;
+          var scale = Math.min(1, maxDim / Math.max(w, h));
+          w = Math.max(1, Math.round(w * scale)); h = Math.max(1, Math.round(h * scale));
+          var canvas = document.createElement('canvas');
+          canvas.width = w; canvas.height = h;
+          var ctx = canvas.getContext('2d');
+          ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, w, h);
+          ctx.drawImage(img, 0, 0, w, h);
+          URL.revokeObjectURL(url);
+          canvas.toBlob(function(outBlob){
+            if(!outBlob){ reject(new Error('No se pudo procesar la imagen')); return; }
+            blobToBase64(outBlob).then(function(b64){ resolve({ base64: b64, mediaType: 'image/jpeg' }); }, reject);
+          }, 'image/jpeg', 0.88);
+        }catch(e){ reject(e); }
       };
-      img.onerror = reject;
-      img.src = URL.createObjectURL(blob);
+      img.onerror = function(){ URL.revokeObjectURL(url); reject(new Error('No se pudo abrir la imagen')); };
+      img.src = url;
     });
   }
 
+  var PDF_WORKER = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
   function pdfFirstPageToBlob(file){
+    if(typeof pdfjsLib === 'undefined'){
+      var e = new Error('pdf-lib-missing'); throw e;
+    }
+    pdfjsLib.GlobalWorkerOptions.workerSrc = PDF_WORKER;
     return file.arrayBuffer().then(function(buf){
       return pdfjsLib.getDocument({ data: buf }).promise;
     }).then(function(pdf){ return pdf.getPage(1); }).then(function(page){
-      var viewport = page.getViewport({ scale: 2 });
+      var viewport = page.getViewport({ scale: 1.6 });
       var canvas = document.createElement('canvas');
       canvas.width = viewport.width; canvas.height = viewport.height;
       var ctx = canvas.getContext('2d');
-      return page.render({ canvasContext: ctx, viewport: viewport }).promise.then(function(){
-        return new Promise(function(resolve){ canvas.toBlob(resolve, 'image/png'); });
+      ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+      return page.render({ canvasContext: ctx, viewport: viewport, intent: 'print' }).promise.then(function(){
+        return new Promise(function(resolve, reject){
+          canvas.toBlob(function(b){ b ? resolve(b) : reject(new Error('No se pudo convertir el PDF')); }, 'image/png');
+        });
       });
+    });
+  }
+
+  function guard(promiseOrFn, signal, ms, stage){
+    return new Promise(function(resolve, reject){
+      var timer = null;
+      function cleanup(){ clearTimeout(timer); signal.removeEventListener('abort', onAbort); }
+      function onAbort(){ cleanup(); var e = new Error('abort'); e.name = 'AbortError'; reject(e); }
+      if(signal.aborted){ onAbort(); return; }
+      signal.addEventListener('abort', onAbort);
+      if(ms){ timer = setTimeout(function(){ cleanup(); var e = new Error(stage + ' timeout'); e.name = 'TimeoutError'; e.stage = stage; reject(e); }, ms); }
+      var p;
+      try{ p = typeof promiseOrFn === 'function' ? promiseOrFn() : promiseOrFn; }catch(err){ cleanup(); reject(err); return; }
+      Promise.resolve(p).then(function(v){ cleanup(); resolve(v); }, function(e){ cleanup(); reject(e); });
     });
   }
 
@@ -457,34 +497,89 @@
     if(err && err.status === 403) return 'Clave de API inválida o sin permiso — hacé clic en el engranaje (arriba a la derecha) para corregirla.';
     if(err && err.status === 400) return 'La API rechazó el pedido (' + (err.message || 'motivo desconocido') + ') — revisá la clave o probá de nuevo.';
     if(err && err.status === 404) return 'El modelo no está disponible con esta clave — hacé clic en el engranaje y revisá la clave.';
-    if(err && err.status === 429) return 'Alcanzaste el límite gratuito por ahora — esperá un momento y probá de nuevo.';
+    if(err && err.status === 429) return 'Alcanzaste el límite gratuito por ahora — esperá un momento y tocá Reintentar.';
+    if(err && err.status >= 500) return 'El servidor de Gemini está saturado (error ' + err.status + ') — tocá Reintentar en unos segundos.';
     if(err && err.message === 'no-json') return 'No se pudo interpretar la respuesta. Probá de nuevo.';
+    if(err && err.message === 'pdf-lib-missing') return 'No cargó el lector de PDF (¿la red bloquea cdnjs.cloudflare.com?). Usá una captura de pantalla (Ctrl+V).';
     if(err && err.name === 'AbortError') return 'Cancelado.';
-    if(err && /Failed to fetch/i.test(err.message || '')) return 'No hay conexión con el servidor de Gemini. Revisá tu internet.';
+    if(err && err.name === 'TimeoutError' && err.stage === 'pdf') return 'No se pudo convertir el PDF a tiempo (¿la red bloquea el lector de PDF?). Usá una captura de pantalla (Ctrl+V).';
+    if(err && err.name === 'TimeoutError' && err.stage === 'imagen') return 'No se pudo procesar la imagen a tiempo. Probá con otra captura.';
+    if(err && err.name === 'TimeoutError') return 'Gemini no respondió después de 3 intentos — es la conexión del sanatorio hacia Google. Tocá Reintentar o probá desde otra red.';
+    if(err && /Failed to fetch|NetworkError|Load failed/i.test(err.message || '')) return 'No hay conexión con el servidor de Gemini (¿la red del sanatorio lo bloquea?). Revisá tu internet y tocá Reintentar.';
     return 'No se pudo leer la imagen (' + (err && err.message ? err.message : 'error desconocido') + ').';
+  }
+
+  var ATTEMPT_MS = 60000;
+  var MAX_ATTEMPTS = 3;
+
+  function wait(ms, signal){
+    return new Promise(function(resolve, reject){
+      var t = setTimeout(function(){ signal.removeEventListener('abort', onAbort); resolve(); }, ms);
+      function onAbort(){ clearTimeout(t); var e = new Error('abort'); e.name = 'AbortError'; reject(e); }
+      if(signal.aborted){ onAbort(); return; }
+      signal.addEventListener('abort', onAbort);
+    });
+  }
+
+  function askGemini(apiKey, prepared, userSignal, onAttempt){
+    function attempt(n){
+      onAttempt(n);
+      var ctl = new AbortController();
+      var timedOut = false;
+      function onUserAbort(){ ctl.abort(); }
+      userSignal.addEventListener('abort', onUserAbort);
+      var timer = setTimeout(function(){ timedOut = true; ctl.abort(); }, ATTEMPT_MS);
+      function cleanup(){ clearTimeout(timer); userSignal.removeEventListener('abort', onUserAbort); }
+      return callGemini(apiKey, prepared.base64, prepared.mediaType, ctl.signal).then(function(text){
+        cleanup();
+        return text;
+      }, function(err){
+        cleanup();
+        if(userSignal.aborted){ var a = new Error('abort'); a.name = 'AbortError'; throw a; }
+        var retryable = timedOut || err.status === undefined || err.status === 429 || err.status >= 500;
+        if(retryable && n < MAX_ATTEMPTS){
+          return wait(n === 1 ? 1500 : 3000, userSignal).then(function(){ return attempt(n + 1); });
+        }
+        if(timedOut){ var t = new Error('gemini timeout'); t.name = 'TimeoutError'; t.stage = 'gemini'; throw t; }
+        throw err;
+      });
+    }
+    return attempt(1);
   }
 
   function handleFile(file){
     var apiKey = getKey();
     if(!apiKey){ renderKeySetup(); return; }
+    if(currentController) currentController.abort();
+    var myRun = ++runCounter;
     lastFile = file;
+    busyStage = file.type === 'application/pdf' ? 'Convirtiendo el PDF' : 'Preparando la imagen';
     renderBusy();
     var controller = new AbortController();
     currentController = controller;
+    var sig = controller.signal;
+    function stale(){ return myRun !== runCounter; }
+
     Promise.resolve().then(function(){
-      if(file.type === 'application/pdf') return pdfFirstPageToBlob(file);
+      if(file.type === 'application/pdf') return guard(function(){ return pdfFirstPageToBlob(file); }, sig, 25000, 'pdf');
       return file;
     }).then(function(blob){
-      return prepareImage(blob);
+      setStage('Preparando la imagen');
+      return guard(function(){ return prepareImage(blob); }, sig, 20000, 'imagen');
     }).then(function(prepared){
-      return callGemini(apiKey, prepared.base64, prepared.mediaType, controller.signal);
+      setStage('Enviando a Gemini');
+      return askGemini(apiKey, prepared, sig, function(n){
+        setStage(n === 1 ? 'Esperando a Gemini' : 'Sin respuesta, reintentando (' + n + '/' + MAX_ATTEMPTS + ')');
+      });
     }).then(function(text){
+      if(stale()) return;
       currentController = null;
       var data = extractJson(text);
       var line = computeLine(data);
       if(!line){ renderErr('No se pudieron leer todos los valores con confianza — probá con una captura más clara y completa.'); return; }
       renderDone(line);
     }).catch(function(err){
+      if(stale()) return;
       currentController = null;
       renderErr(errorMessageFor(err));
     });

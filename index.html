@@ -137,7 +137,7 @@
   var foot = document.getElementById('foot');
   var STORAGE_KEY = 'espiroExpressApiKey';
   var MODEL = 'gemini-3.5-flash-lite';
-  var APP_VERSION = '2026-11-26';
+  var APP_VERSION = '2026-11-26-lin';
 
   // ---- registro de fallas: nunca guardar clave, nombre de archivo ni valores del paciente ----
   var LOG_KEY = 'espiroExpressErrorLog';
@@ -197,6 +197,7 @@
     '{\n' +
     '  "fecha": string,            // fecha de la prueba PRE, tal cual aparece en el informe\n' +
     '  "fev1_fvc_pct": number,     // fila FEV1/FVC, columna "Best" (nunca PRE #1/#2/#3), en %\n' +
+    '  "fev1_fvc_lin": number,     // fila FEV1/FVC (no la fila FEV1/VC), columna "LLN" o "LIN" (limite inferior de normalidad), o null si no se ve\n' +
     '  "fev1_L": number,           // fila FEV1, columna "Best" (nunca PRE #1/#2/#3), en litros\n' +
     '  "fev1_pct_teor": number,    // fila FEV1, columna "%Teor." asociada al valor Best (entero)\n' +
     '  "fev1_z": number,           // fila FEV1, columna "Z-score" asociada al valor Best\n' +
@@ -239,7 +240,16 @@
     var req = [ratio, fev1L, fev1Pct, fev1Z, fvcL, fvcPct, fvcZ];
     if(!date || req.some(function(v){ return Number.isNaN(v); })) return null;
 
-    var line = 'Espirometria ' + date + ': FEV1/FVC: ' + Math.round(ratio) + '%, ' +
+    var ratioTxt = String(Math.round(ratio)), linTxt = '';
+    var lin = toNum(d.fev1_fvc_lin);
+    if(lin > 0){
+      linTxt = String(Math.round(lin));
+      // a 1 punto o menos del LIN, un decimal para ver si queda por debajo o por arriba
+      if(Math.abs(Math.round(ratio * 10) - Math.round(lin * 10)) <= 10){ ratioTxt = ratio.toFixed(1); linTxt = lin.toFixed(1); }
+      linTxt = ' (LIN: ' + linTxt + ')';
+    }
+
+    var line = 'Espirometria ' + date + ': FEV1/FVC: ' + ratioTxt + '%' + linTxt + ', ' +
       'FEV1: ' + fev1L.toFixed(2) + 'L (' + Math.round(fev1Pct) + '%) ' + fev1Z.toFixed(2) + ', ' +
       'FVC: ' + fvcL.toFixed(2) + 'L (' + Math.round(fvcPct) + '%) ' + fvcZ.toFixed(2);
 
